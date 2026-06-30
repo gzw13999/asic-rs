@@ -33,9 +33,9 @@ use rpc::AvalonMinerRPCAPI;
 use serde_json::{Value, json};
 
 use super::summary::{
-    apply_summary_hashboards, hashboards_use_summary_format, parse_legacy_ps_tuning_target,
-    parse_legacy_ps_wattage, parse_summary_wattage, summary_scalar_locations,
-    summary_stat_locations, summary_wattage_locations, HBINFO, SUMMARY_GHSMM, SUMMARY_STATS,
+    HBINFO, SUMMARY_GHSMM, SUMMARY_STATS, apply_summary_hashboards, hashboards_use_summary_format,
+    parse_legacy_ps_tuning_target, parse_legacy_ps_wattage, parse_summary_wattage,
+    summary_scalar_locations, summary_stat_locations, summary_wattage_locations,
 };
 use crate::firmware::AvalonStockFirmware;
 
@@ -876,8 +876,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_avalon_a_summary_wattage_without_hashboards_field() -> anyhow::Result<()> {
-        let miner =
-            AvalonAMiner::new(IpAddr::from([127, 0, 0, 1]), AvalonMinerModel::Avalon1566Ha);
+        let miner = AvalonAMiner::new(IpAddr::from([127, 0, 0, 1]), AvalonMinerModel::Avalon1566Ha);
         let mut results = HashMap::new();
         let stats_cmd = MinerCommand::RPC {
             command: "stats",
