@@ -12,7 +12,7 @@ use asic_rs_core::{
         pools::PoolGroupConfig,
     },
     data::{
-        board::{BoardData, ChipData},
+        board::BoardData,
         collector::{
             DataCollector, DataExtensions, DataExtractor, DataField, DataLocation, get_by_pointer,
         },
@@ -27,10 +27,14 @@ use asic_rs_core::{
 };
 use async_trait::async_trait;
 use macaddr::MacAddr;
-use measurements::{AngularVelocity, Power, Temperature, Voltage};
+use measurements::{AngularVelocity, Power, Temperature};
 use rpc::AvalonMinerRPCAPI;
 use serde_json::{Value, json};
 
+use super::summary::{
+    HBINFO, SUMMARY_GHSMM, SUMMARY_STATS, apply_summary_hashboards, parse_summary_wattage,
+    summary_scalar_locations, summary_stat_locations, summary_wattage_locations,
+};
 use crate::firmware::AvalonStockFirmware;
 
 mod rpc;
@@ -277,6 +281,10 @@ impl GetDataLocations for AvalonQMiner {
             command: "stats",
             parameters: None,
         };
+        const RPC_LITESTATS: MinerCommand = MinerCommand::RPC {
+            command: "litestats",
+            parameters: None,
+        };
         const RPC_DEVS: MinerCommand = MinerCommand::RPC {
             command: "devs",
             parameters: None,
@@ -285,6 +293,7 @@ impl GetDataLocations for AvalonQMiner {
             command: "pools",
             parameters: None,
         };
+        let litestats = Some(RPC_LITESTATS);
 
         match data_field {
             DataField::Mac => vec![(
@@ -319,70 +328,41 @@ impl GetDataLocations for AvalonQMiner {
                     tag: None,
                 },
             )],
-            DataField::ExpectedHashrate => vec![(
-                RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0:Summary/STATS/GHSmm"),
-                    tag: None,
-                },
-            )],
-            DataField::Hashboards => vec![(
-                RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0:Summary/STATS"),
-                    tag: Some("summary"),
-                },
-            )],
+            DataField::ExpectedHashrate => {
+                summary_scalar_locations(RPC_STATS, litestats, SUMMARY_GHSMM)
+            }
+            DataField::Hashboards => summary_stat_locations(RPC_STATS, litestats),
             DataField::Chips => vec![(
                 RPC_STATS,
                 DataExtractor {
                     func: get_by_pointer,
-                    key: Some("/STATS/0/HBinfo"),
+                    key: Some(HBINFO),
                     tag: None,
                 },
             )],
-            DataField::AverageTemperature => vec![(
+            DataField::AverageTemperature => summary_scalar_locations(
                 RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0:Summary/STATS/ITemp"),
-                    tag: None,
-                },
-            )],
-            DataField::TuningTarget => vec![(
+                litestats,
+                "/STATS/0/MM ID0:Summary/STATS/ITemp",
+            ),
+            DataField::FluidTemperature => summary_scalar_locations(
                 RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0:Summary/STATS/MPO"),
-                    tag: None,
-                },
-            )],
-            DataField::Wattage => vec![(
+                litestats,
+                "/STATS/0/MM ID0:Summary/STATS/ITemp",
+            ),
+            DataField::OutletFluidTemperature => summary_scalar_locations(
                 RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0:Summary/STATS/WALLPOWER"),
-                    tag: None,
-                },
-            )],
-            DataField::Fans => vec![(
-                RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0:Summary/STATS"),
-                    tag: None,
-                },
-            )],
-            DataField::LightFlashing => vec![(
-                RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0:Summary/STATS/Led"),
-                    tag: None,
-                },
-            )],
+                litestats,
+                "/STATS/0/MM ID0:Summary/STATS/HBOTemp",
+            ),
+            DataField::TuningTarget => {
+                summary_scalar_locations(RPC_STATS, litestats, "/STATS/0/MM ID0:Summary/STATS/MPO")
+            }
+            DataField::Wattage => summary_wattage_locations(RPC_STATS, litestats),
+            DataField::Fans => summary_scalar_locations(RPC_STATS, litestats, SUMMARY_STATS),
+            DataField::LightFlashing => {
+                summary_scalar_locations(RPC_STATS, litestats, "/STATS/0/MM ID0:Summary/STATS/Led")
+            }
             DataField::Uptime => vec![(
                 RPC_STATS,
                 DataExtractor {
@@ -474,90 +454,8 @@ impl GetHashboards for AvalonQMiner {
             .get(&DataField::Hashboards)
             .and_then(|v| v.get("summary"));
 
-        fn summary_f64(summary: &Value, key: &str, idx: usize) -> Option<f64> {
-            let value = summary.get(key)?;
-            value
-                .as_array()
-                .and_then(|arr| arr.get(idx))
-                .unwrap_or(value)
-                .as_f64()
-        }
-
-        for board in hashboards.iter_mut() {
-            let idx = board.position as usize;
-
-            if let Some(summary) = summary {
-                board.hashrate = summary_f64(summary, "MGHS", idx).map(|r| {
-                    HashRate {
-                        value: r,
-                        unit: HashRateUnit::GigaHash,
-                        algo: "SHA256".to_string(),
-                    }
-                    .as_unit(HashRateUnit::default())
-                });
-
-                board.board_temperature =
-                    summary_f64(summary, "HBITemp", idx).map(Temperature::from_celsius);
-
-                board.inlet_chip_temperature =
-                    summary_f64(summary, "ITemp", idx).map(Temperature::from_celsius);
-            }
-
-            board.active = board.hashrate.as_ref().map(|h| h.value > 0.0);
-            if hb_info.is_none() {
-                board.working_chips = match (board.active, board.expected_chips) {
-                    (Some(true), Some(expected_chips)) => Some(expected_chips),
-                    (Some(false), _) => Some(0),
-                    _ => None,
-                };
-            }
-
-            if let Some(hb_info) = hb_info {
-                let key = format!("HB{idx}");
-                let Some(board_info) = hb_info.get(&key) else {
-                    continue;
-                };
-
-                let temps: Vec<f64> = board_info
-                    .get("PVT_T0")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
-                    .unwrap_or_default();
-
-                let volts: Vec<f64> = board_info
-                    .get("PVT_V0")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
-                    .unwrap_or_default();
-
-                let works: Vec<f64> = board_info
-                    .get("MW0")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
-                    .unwrap_or_default();
-
-                board.chips = temps
-                    .iter()
-                    .zip(volts.iter())
-                    .zip(works.iter())
-                    .enumerate()
-                    .map(|(pos, ((&t, &v), &w))| ChipData {
-                        position: pos as u16,
-                        temperature: Some(Temperature::from_celsius(t)),
-                        voltage: Some(Voltage::from_millivolts(v)),
-                        working: Some(w > 0.0),
-                        ..Default::default()
-                    })
-                    .collect();
-
-                board.working_chips = Some(
-                    board
-                        .chips
-                        .iter()
-                        .filter(|chip| chip.working.unwrap_or(false))
-                        .count() as u16,
-                );
-            }
+        if let Some(summary) = summary {
+            apply_summary_hashboards(&mut hashboards, summary, hb_info);
         }
 
         hashboards
@@ -602,10 +500,12 @@ impl GetFans for AvalonQMiner {
             return Vec::new();
         }
 
+        let fan_stats = stats.get("summary").unwrap_or(stats);
+
         (1..=expected_fans)
             .filter_map(|idx| {
                 let key = format!("Fan{idx}");
-                stats
+                fan_stats
                     .get(&key)
                     .and_then(|val| val.as_f64())
                     .map(|rpm| FanData {
@@ -621,7 +521,8 @@ impl GetPsuFans for AvalonQMiner {}
 
 impl GetWattage for AvalonQMiner {
     fn parse_wattage(&self, data: &HashMap<DataField, Value>) -> Option<Power> {
-        data.extract_map::<f64, _>(DataField::Wattage, Power::from_watts)
+        data.get(&DataField::Wattage)
+            .and_then(parse_summary_wattage)
     }
 }
 
@@ -648,7 +549,18 @@ impl GetUptime for AvalonQMiner {
     }
 }
 
-impl GetFluidTemperature for AvalonQMiner {}
+impl GetFluidTemperature for AvalonQMiner {
+    fn parse_fluid_temperature(&self, data: &HashMap<DataField, Value>) -> Option<Temperature> {
+        data.extract_map::<f64, _>(DataField::FluidTemperature, Temperature::from_celsius)
+    }
+
+    fn parse_outlet_fluid_temperature(
+        &self,
+        data: &HashMap<DataField, Value>,
+    ) -> Option<Temperature> {
+        data.extract_map::<f64, _>(DataField::OutletFluidTemperature, Temperature::from_celsius)
+    }
+}
 impl GetIsMining for AvalonQMiner {}
 
 impl GetPools for AvalonQMiner {
@@ -726,7 +638,10 @@ mod tests {
     use asic_rs_makes_avalon::models::AvalonMinerModel;
 
     use super::*;
-    use crate::test::json::{DEVS_COMMAND, PARSED_STATS_COMMAND, POOLS_COMMAND, VERSION_COMMAND};
+    use crate::test::json::{
+        DEVS_COMMAND, LITESTATS_PARSED, PARSED_STATS_COMMAND, POOLS_COMMAND, STATS_EMPTY_PARSED,
+        VERSION_COMMAND,
+    };
 
     #[test]
     fn parse_hashboards_missing_hbinfo_entries_do_not_panic() {
@@ -769,6 +684,10 @@ mod tests {
             command: "stats",
             parameters: None,
         };
+        let litestats_cmd: MinerCommand = MinerCommand::RPC {
+            command: "litestats",
+            parameters: None,
+        };
         let devs_cmd: MinerCommand = MinerCommand::RPC {
             command: "devs",
             parameters: None,
@@ -779,6 +698,7 @@ mod tests {
         };
 
         results.insert(stats_cmd, Value::from_str(PARSED_STATS_COMMAND)?);
+        results.insert(litestats_cmd, Value::from_str(PARSED_STATS_COMMAND)?);
         results.insert(devs_cmd, Value::from_str(DEVS_COMMAND)?);
         results.insert(pools_cmd, Value::from_str(POOLS_COMMAND)?);
         results.insert(version_cmd, Value::from_str(VERSION_COMMAND)?);
@@ -820,6 +740,60 @@ mod tests {
         );
         assert_eq!(miner_data.fans.len(), 4);
         assert_eq!(miner_data.hashboards[0].chips.len(), 160);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_avalon_q_uses_litestats_when_stats_summary_empty() -> anyhow::Result<()> {
+        let miner = AvalonQMiner::new(IpAddr::from([127, 0, 0, 1]), AvalonMinerModel::AvalonHomeQ);
+
+        let mut results = HashMap::new();
+        let stats_cmd = MinerCommand::RPC {
+            command: "stats",
+            parameters: None,
+        };
+        let litestats_cmd = MinerCommand::RPC {
+            command: "litestats",
+            parameters: None,
+        };
+        let devs_cmd = MinerCommand::RPC {
+            command: "devs",
+            parameters: None,
+        };
+
+        results.insert(stats_cmd, Value::from_str(STATS_EMPTY_PARSED)?);
+        results.insert(litestats_cmd, Value::from_str(LITESTATS_PARSED)?);
+        results.insert(devs_cmd, Value::from_str(DEVS_COMMAND)?);
+
+        let mock_api = MockAPIClient::new(results);
+        let mut collector = DataCollector::new_with_client(&miner, &mock_api);
+        let data = collector
+            .collect(&[
+                DataField::Hashboards,
+                DataField::Fans,
+                DataField::Wattage,
+                DataField::FluidTemperature,
+                DataField::OutletFluidTemperature,
+            ])
+            .await;
+
+        let hashboards = miner.parse_hashboards(&data);
+        assert_eq!(hashboards.len(), 1);
+        assert_eq!(
+            hashboards[0].board_temperature,
+            Some(Temperature::from_celsius(75.0))
+        );
+        assert_eq!(miner.parse_fans(&data).len(), 4);
+        assert_eq!(miner.parse_wattage(&data), Some(Power::from_watts(1598.0)));
+        assert_eq!(
+            miner.parse_fluid_temperature(&data),
+            Some(Temperature::from_celsius(37.0))
+        );
+        assert_eq!(
+            miner.parse_outlet_fluid_temperature(&data),
+            Some(Temperature::from_celsius(77.0))
+        );
 
         Ok(())
     }

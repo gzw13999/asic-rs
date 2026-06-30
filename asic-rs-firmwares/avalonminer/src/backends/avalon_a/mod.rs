@@ -32,6 +32,11 @@ use measurements::{AngularVelocity, Frequency, Power, Temperature, Voltage};
 use rpc::AvalonMinerRPCAPI;
 use serde_json::{Value, json};
 
+use super::summary::{
+    apply_summary_hashboards, hashboards_use_summary_format, parse_legacy_ps_tuning_target,
+    parse_legacy_ps_wattage, parse_summary_wattage, summary_scalar_locations,
+    summary_stat_locations, summary_wattage_locations, HBINFO, SUMMARY_GHSMM, SUMMARY_STATS,
+};
 use crate::firmware::AvalonStockFirmware;
 
 mod rpc;
@@ -333,54 +338,95 @@ impl GetDataLocations for AvalonAMiner {
                     tag: None,
                 },
             )],
-            DataField::ExpectedHashrate => vec![(
-                RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0/GHSmm"),
-                    tag: None,
-                },
-            )],
-            DataField::Hashboards => vec![(
-                RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0"),
-                    tag: None,
-                },
-            )],
-            DataField::Chips => vec![(
-                RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0"),
-                    tag: None,
-                },
-            )],
-            DataField::Wattage => vec![(
-                RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0/PS"),
-                    tag: None,
-                },
-            )],
-            DataField::TuningTarget => vec![(
-                RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0/PS"),
-                    tag: None,
-                },
-            )],
-            DataField::Fans => vec![(
-                RPC_STATS,
-                DataExtractor {
-                    func: get_by_pointer,
-                    key: Some("/STATS/0/MM ID0"),
-                    tag: None,
-                },
-            )],
+            DataField::ExpectedHashrate => {
+                let mut locations = vec![(
+                    RPC_STATS,
+                    DataExtractor {
+                        func: get_by_pointer,
+                        key: Some("/STATS/0/MM ID0/GHSmm"),
+                        tag: None,
+                    },
+                )];
+                locations.extend(summary_scalar_locations(RPC_STATS, None, SUMMARY_GHSMM));
+                locations
+            }
+            DataField::Hashboards => {
+                let mut locations = vec![(
+                    RPC_STATS,
+                    DataExtractor {
+                        func: get_by_pointer,
+                        key: Some("/STATS/0/MM ID0"),
+                        tag: None,
+                    },
+                )];
+                locations.extend(summary_stat_locations(RPC_STATS, None));
+                locations
+            }
+            DataField::Chips => {
+                let mut locations = vec![(
+                    RPC_STATS,
+                    DataExtractor {
+                        func: get_by_pointer,
+                        key: Some("/STATS/0/MM ID0"),
+                        tag: None,
+                    },
+                )];
+                locations.push((
+                    RPC_STATS,
+                    DataExtractor {
+                        func: get_by_pointer,
+                        key: Some(HBINFO),
+                        tag: None,
+                    },
+                ));
+                locations
+            }
+            DataField::Wattage => {
+                let mut locations = vec![(
+                    RPC_STATS,
+                    DataExtractor {
+                        func: get_by_pointer,
+                        key: Some("/STATS/0/MM ID0/PS"),
+                        tag: None,
+                    },
+                )];
+                locations.extend(summary_wattage_locations(RPC_STATS, None));
+                locations
+            }
+            DataField::TuningTarget => {
+                let mut locations = vec![(
+                    RPC_STATS,
+                    DataExtractor {
+                        func: get_by_pointer,
+                        key: Some("/STATS/0/MM ID0/PS"),
+                        tag: None,
+                    },
+                )];
+                locations.extend(summary_scalar_locations(
+                    RPC_STATS,
+                    None,
+                    "/STATS/0/MM ID0:Summary/STATS/MPO",
+                ));
+                locations
+            }
+            DataField::Fans => {
+                let mut locations = vec![(
+                    RPC_STATS,
+                    DataExtractor {
+                        func: get_by_pointer,
+                        key: Some("/STATS/0/MM ID0"),
+                        tag: None,
+                    },
+                )];
+                locations.extend(summary_scalar_locations(RPC_STATS, None, SUMMARY_STATS));
+                locations
+            }
+            DataField::FluidTemperature => {
+                summary_scalar_locations(RPC_STATS, None, "/STATS/0/MM ID0:Summary/STATS/ITemp")
+            }
+            DataField::OutletFluidTemperature => {
+                summary_scalar_locations(RPC_STATS, None, "/STATS/0/MM ID0:Summary/STATS/HBOTemp")
+            }
             DataField::LightFlashing => vec![(
                 RPC_STATS,
                 DataExtractor {
@@ -490,6 +536,17 @@ impl GetHashboards for AvalonAMiner {
                     BoardData::new(idx, self.device_info.hardware.chips_for_board(idx as usize))
                 })
                 .collect();
+
+        if hashboards_use_summary_format(data) {
+            let hb_info = data.get(&DataField::Chips).and_then(|v| v.as_object());
+            if let Some(summary) = data
+                .get(&DataField::Hashboards)
+                .and_then(|v| v.get("summary"))
+            {
+                apply_summary_hashboards(&mut hashboards, summary, hb_info);
+            }
+            return hashboards;
+        }
 
         let Some(hb_info) = data.get(&DataField::Hashboards).and_then(|v| v.as_object()) else {
             return hashboards;
@@ -647,10 +704,12 @@ impl GetFans for AvalonAMiner {
             return Vec::new();
         }
 
+        let fan_stats = stats.get("summary").unwrap_or(stats);
+
         (1..=expected_fans)
             .filter_map(|idx| {
                 let key = format!("Fan{idx}");
-                stats
+                fan_stats
                     .get(&key)
                     .and_then(|val| val.as_f64())
                     .map(|rpm| FanData {
@@ -666,19 +725,18 @@ impl GetPsuFans for AvalonAMiner {}
 
 impl GetWattage for AvalonAMiner {
     fn parse_wattage(&self, data: &HashMap<DataField, Value>) -> Option<Power> {
-        let wattage = data.get(&DataField::Wattage).and_then(|v| v.as_array())?;
-        let wattage = wattage.get(4).and_then(|watts: &Value| watts.as_f64())?;
-        Some(Power::from_watts(wattage))
+        let wattage = data.get(&DataField::Wattage)?;
+        parse_summary_wattage(wattage).or_else(|| parse_legacy_ps_wattage(wattage))
     }
 }
 
 impl GetTuningTarget for AvalonAMiner {
     fn parse_tuning_target(&self, data: &HashMap<DataField, Value>) -> Option<TuningTarget> {
-        let limit = data
-            .get(&DataField::TuningTarget)
-            .and_then(|v| v.as_array())?;
-        let limit = limit.get(6).and_then(|watts: &Value| watts.as_f64())?;
-        Some(TuningTarget::Power(Power::from_watts(limit)))
+        let target = data.get(&DataField::TuningTarget)?;
+        if let Some(watts) = target.as_f64().map(Power::from_watts) {
+            return Some(TuningTarget::Power(watts));
+        }
+        parse_legacy_ps_tuning_target(target).map(TuningTarget::Power)
     }
 }
 
@@ -698,7 +756,18 @@ impl GetUptime for AvalonAMiner {
     }
 }
 
-impl GetFluidTemperature for AvalonAMiner {}
+impl GetFluidTemperature for AvalonAMiner {
+    fn parse_fluid_temperature(&self, data: &HashMap<DataField, Value>) -> Option<Temperature> {
+        data.extract_map::<f64, _>(DataField::FluidTemperature, Temperature::from_celsius)
+    }
+
+    fn parse_outlet_fluid_temperature(
+        &self,
+        data: &HashMap<DataField, Value>,
+    ) -> Option<Temperature> {
+        data.extract_map::<f64, _>(DataField::OutletFluidTemperature, Temperature::from_celsius)
+    }
+}
 impl GetIsMining for AvalonAMiner {}
 
 impl GetPools for AvalonAMiner {
@@ -778,7 +847,53 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::test::json::AVALON_A_STATS_PARSED;
+    use crate::test::json::{AVALON_A_STATS_PARSED, PARSED_STATS_COMMAND};
+
+    #[tokio::test]
+    async fn test_avalon_a_summary_format_hashboards() -> anyhow::Result<()> {
+        let miner = AvalonAMiner::new(IpAddr::from([127, 0, 0, 1]), AvalonMinerModel::Avalon1566Ha);
+        let mut results = HashMap::new();
+        let stats_cmd = MinerCommand::RPC {
+            command: "stats",
+            parameters: None,
+        };
+
+        results.insert(stats_cmd, Value::from_str(PARSED_STATS_COMMAND)?);
+
+        let mock_api = MockAPIClient::new(results);
+        let mut collector = DataCollector::new_with_client(&miner, &mock_api);
+        let data = collector
+            .collect(&[DataField::Hashboards, DataField::Chips])
+            .await;
+        let hashboards = miner.parse_hashboards(&data);
+
+        assert_eq!(hashboards.len(), 4);
+        assert!(hashboards[0].hashrate.is_some());
+        assert!(!hashboards[0].chips.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_avalon_a_summary_wattage_without_hashboards_field() -> anyhow::Result<()> {
+        let miner =
+            AvalonAMiner::new(IpAddr::from([127, 0, 0, 1]), AvalonMinerModel::Avalon1566Ha);
+        let mut results = HashMap::new();
+        let stats_cmd = MinerCommand::RPC {
+            command: "stats",
+            parameters: None,
+        };
+
+        results.insert(stats_cmd, Value::from_str(PARSED_STATS_COMMAND)?);
+
+        let mock_api = MockAPIClient::new(results);
+        let mut collector = DataCollector::new_with_client(&miner, &mock_api);
+        let data = collector.collect(&[DataField::Wattage]).await;
+
+        assert_eq!(miner.parse_wattage(&data), Some(Power::from_watts(2245.0)));
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_avalon_a() -> anyhow::Result<()> {
