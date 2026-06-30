@@ -16,6 +16,6 @@ pub(crate) const ASCSET_SOFTON_COMMAND: &str = include_str!("ascset_softon.json"
 pub(crate) const ASCSET_SOFTOFF_COMMAND: &str = include_str!("ascset_softoff.json");
 pub(crate) const PARSED_STATS_COMMAND: &str = include_str!("stats_parsed.json");
 pub(crate) const STATS_EMPTY_PARSED: &str = include_str!("stats_empty_parsed.json");
-pub(crate) const LITESTATS_PARSED: &str = include_str!("litestats_parsed.json");
+pub(crate) const PARSED_LITESTATS: &str = include_str!("litestats_parsed.json");
 pub(crate) const AVALON_A_STATS: &str = include_str!("avalon_a_stats.json");
 pub(crate) const AVALON_A_STATS_PARSED: &str = include_str!("avalon_a_stats_parsed.json");
